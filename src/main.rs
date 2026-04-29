@@ -17,6 +17,7 @@ mod app {
     use std::env;
     use std::ffi::c_void;
     use std::fs;
+    use std::io::{ErrorKind, Write};
     use std::mem::{size_of, zeroed};
     use std::path::PathBuf;
     use std::ptr::{copy_nonoverlapping, null_mut};
@@ -37,6 +38,8 @@ mod app {
     const EXIT_HOTKEY_ID: i32 = 2;
     const WM_HOTKEY: Uint = 0x0312;
     const CONFIG_FILE_NAME: &str = "layout_fixer.cfg";
+    const INSTANCE_MUTEX_NAME: &str = "Local\\LayoutFixerSingleInstance";
+    const ERROR_ALREADY_EXISTS: Dword = 183;
 
     const MOD_ALT: Uint = 0x0001;
     const MOD_CONTROL: Uint = 0x0002;
@@ -141,6 +144,12 @@ mod app {
 
     #[link(name = "kernel32")]
     extern "system" {
+        fn CreateMutexW(
+            security_attributes: Handle,
+            initial_owner: Bool,
+            name: *const u16,
+        ) -> Handle;
+        fn CloseHandle(object: Handle) -> Bool;
         fn GetLastError() -> Dword;
         fn GlobalAlloc(flags: Uint, bytes: usize) -> Hglobal;
         fn GlobalFree(mem: Hglobal) -> Hglobal;
@@ -150,6 +159,11 @@ mod app {
     }
 
     pub fn run() -> Result<(), String> {
+        let _single_instance = match acquire_single_instance()? {
+            Some(guard) => guard,
+            None => return Ok(()),
+        };
+
         let config_path = config_path();
         let (hotkey, configured_now) = load_or_capture_hotkey(&config_path)?;
         register_exit_hotkey()?;
@@ -188,6 +202,40 @@ mod app {
         }
 
         Ok(())
+    }
+
+    struct SingleInstanceGuard {
+        handle: Handle,
+    }
+
+    impl Drop for SingleInstanceGuard {
+        fn drop(&mut self) {
+            unsafe {
+                CloseHandle(self.handle);
+            }
+        }
+    }
+
+    fn acquire_single_instance() -> Result<Option<SingleInstanceGuard>, String> {
+        let name = to_wide_null(INSTANCE_MUTEX_NAME);
+        let handle = unsafe { CreateMutexW(null_mut(), 1, name.as_ptr()) };
+
+        if handle.is_null() {
+            return Err(format!(
+                "Could not create single-instance lock. {}",
+                last_error()
+            ));
+        }
+
+        let error = unsafe { GetLastError() };
+        if error == ERROR_ALREADY_EXISTS {
+            unsafe {
+                CloseHandle(handle);
+            }
+            return Ok(None);
+        }
+
+        Ok(Some(SingleInstanceGuard { handle }))
     }
 
     fn load_or_capture_hotkey(config_path: &PathBuf) -> Result<(Hotkey, bool), String> {
@@ -290,19 +338,35 @@ mod app {
     }
 
     fn save_hotkey_config(path: &PathBuf, hotkey: &Hotkey) -> Result<(), String> {
+        if path.exists() {
+            return Ok(());
+        }
+
         let content = format!(
             "# LayoutFixer hotkey config\n# Exit hotkey is always Ctrl+Alt+F12\n\
 display={}\nmodifiers={}\nvk={}\n",
             hotkey.display, hotkey.modifiers, hotkey.vk
         );
 
-        fs::write(path, content).map_err(|error| {
-            format!(
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+        {
+            Ok(mut file) => file.write_all(content.as_bytes()).map_err(|error| {
+                format!(
+                    "Could not save hotkey config to {}.\n{}",
+                    path.display(),
+                    error
+                )
+            }),
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => Ok(()),
+            Err(error) => Err(format!(
                 "Could not save hotkey config to {}.\n{}",
                 path.display(),
                 error
-            )
-        })
+            )),
+        }
     }
 
     fn parse_hotkey_config(content: &str) -> Result<Hotkey, String> {

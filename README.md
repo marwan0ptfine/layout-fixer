@@ -18,6 +18,7 @@ The app works on selected text in any app. Select the wrong text, press your con
 - Lets you choose the conversion hotkey on first run.
 - Saves the chosen hotkey in a config file so you do not choose it every time.
 - Runs in the background without opening a CMD window.
+- Keeps only one running instance. Starting it again while it is already running exits immediately.
 - Uses `Ctrl+Alt+F12` as the exit hotkey.
 - No external Rust crates are required.
 
@@ -80,6 +81,8 @@ vk=84
 ```
 
 To change the shortcut, delete `layout_fixer.cfg` and run the app again.
+
+If `layout_fixer.cfg` already exists, the app reads it and does not overwrite it.
 
 ## Exit
 
